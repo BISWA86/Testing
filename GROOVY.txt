@@ -1,0 +1,318 @@
+//connect to mongo 
+import com.gmongo.GMongo
+def mongo = new GMongo('localhost:27017');
+def db = mongo.getDB('readyTest');
+
+//look up OIDC configs based on env selection 
+def cid = context.expand( '${#Project#clientId}' );
+def config = db.OIDCConfigs.findOne(client_id: cid);
+
+//fetch cliient Counter and access token
+
+def counter = testRunner.getTestCase().getPropertyValue("clientCounter").toInteger()
+def accessToken = db.clientList.find()[counter].access_token
+
+
+
+//populates the Account Details request header
+import com.eviware.soapui.support.types.StringToStringMap 
+def uuid=testRunner.testCase.getPropertyValue('${#TestCase#UUID}')
+def ContentType = 'application/x-www-form-urlencoded'
+def Auth = ("Bearer " + accessToken)
+
+def headers = new StringToStringMap()
+headers.put("Authorization", Auth)
+headers.put("DDA-InteractionId",uuid)
+headers.put("Content-Type", ContentType )
+headers.put("Accept","application/json")
+
+
+
+//Fetch the Account List resp response and parse out the surrogate id 
+import com.eviware.soapui.impl.wsdl.testcase.WsdlTestRunContext
+import groovy.json.JsonSlurper;
+import groovy.json.JsonOutput;
+def jsonReq = testRunner.testCase.getTestStepByName('AccountList-new')
+def resp = jsonReq.getPropertyValue('Response')
+def jsons1 = new JsonSlurper();
+def resParsed = jsons1.parseText (resp)
+
+def cou=resParsed.AccountDescriptorList.DisplayName.size()
+
+// LoOp thru all the acocunts in account list and seggregating them as DDA, OLN , VISA
+log.info cou + "No of accounts "
+
+for (i=0; i<cou; i++){
+
+def AccTy=resParsed.AccountDescriptorList[i].AccountType
+if ( AccTy.equals("DDA")){
+// set the Request Header for account details svc and feed request property
+testRunner.testCase.getTestStepByName("accountDetailsDDA").testRequest.setRequestHeaders(headers)
+//log.info testRunner.testCase.getTestStepByName("accountDetailsDDA").testRequest.getRequestHeaders()
+
+def AccId = resParsed.AccountDescriptorList[i].AccountId
+def Accou = 'accountId=' + AccId 
+
+
+log.info (Accou+"DDA")
+def sAcc = testRunner.testCase.testSteps["accountDetailsDDA"]
+testRunner.testCase.testSteps["accountDetailsDDA"].setPropertyValue('Request', Accou)
+def contsAcc=new WsdlTestRunContext(sAcc)
+sAcc.run(testRunner, contsAcc)
+
+sleep(1000)
+//feed surrogate Account ID to acctSurrogat to get account number and card and branch details 
+
+def jsonReqAcctSurro = testRunner.testCase.testSuite.testCases["DDA Acct test"].getTestStepByName('acctSurrogat')
+def reqAcctSurro = jsonReqAcctSurro.getPropertyValue('Request')
+def jsons2 = new JsonSlurper();
+def reqParsed = jsons2.parseText (reqAcctSurro)
+
+reqParsed.idSet[0].id[0].idType=config.idType
+reqParsed.idSet[0].id[0].idValue=AccId
+
+def jsonReqAsString = JsonOutput.toJson(reqParsed)
+log.info(jsonReqAsString)
+jsonReqAcctSurro.setPropertyValue('Request', jsonReqAsString)
+sleep(1000)
+//calling account Surrogate service
+
+def actSur = testRunner.testCase.testSuite.testCases["DDA Acct test"].testSteps["acctSurrogat"]
+
+def contActSur = new WsdlTestRunContext(actSur)
+actSur.run(testRunner, contActSur)
+sleep(3000)
+// Taking out account number and client Card number , branch number from Acct Surrogate Response and feeding it to DDA Acct test TESTCASE
+
+def feedId=testRunner.testCase.testSuite.testCases["DDA Acct test"].testSteps["feedIdValue"]
+def contfeedId = new WsdlTestRunContext(feedId)
+feedId.run(testRunner, contfeedId)
+def idValue = testRunner.testCase.testSuite.testCases["DDA Acct test"].getPropertyValue('idValue').toString()
+def AcctNo= idValue.substring (22,29)
+def Branch= idValue.substring (17,22)
+def FetchedClientCard=idValue.substring (0,16)
+
+testRunner.testCase.testSuite.testCases["DDA Acct test"].setPropertyValue('AccountNumber',AcctNo)
+testRunner.testCase.testSuite.testCases["DDA Acct test"].setPropertyValue('Branch',Branch)
+testRunner.testCase.testSuite.testCases["DDA Acct test"].setPropertyValue('FetchedClientCard',FetchedClientCard)
+//4519020080115870.000021020163
+
+
+//parsing account details response and storing in testCase propety to check with Party acct rel datails 
+
+def DDAresp=testRunner.testCase.testSteps["accountDetailsDDA"].getPropertyValue('Response')
+def jsons3=new JsonSlurper();
+def DDArespParsed=jsons3.parseText(DDAresp)
+
+def actTyp=DDArespParsed.AccountType
+def cur=DDArespParsed.Currency
+def curBal=DDArespParsed.CurrentBalance.toString()
+def stat=DDArespParsed.Status
+def AccOpn=DDArespParsed.FiAttributes[2].Value
+
+testRunner.testCase.testSuite.testCases["DDA Acct test"].setPropertyValue('AccountType',actTyp)
+testRunner.testCase.testSuite.testCases["DDA Acct test"].setPropertyValue('Currency',cur)
+testRunner.testCase.testSuite.testCases["DDA Acct test"].setPropertyValue('CurrentBalance',curBal)
+testRunner.testCase.testSuite.testCases["DDA Acct test"].setPropertyValue('Status',stat)
+testRunner.testCase.testSuite.testCases["DDA Acct test"].setPropertyValue('AccountOpenDate',AccOpn)
+testRunner.testCase.testSuite.testCases["DDA Acct test"].setPropertyValue('AccountNumber',AcctNo)
+
+def PartyRel=testRunner.testCase.testSuite.testCases["DDA Acct test"].testSteps["party acct rel"]
+
+def contPartyRel=new WsdlTestRunContext(PartyRel)
+PartyRel.run(testRunner, contPartyRel)
+
+sleep(2000)
+
+def checkRun = testRunner.testCase.testSuite.testCases["DDA Acct test"].testSteps["DDA acct details check with party ACCT rel"]
+def contCheckRun=new WsdlTestRunContext(checkRun)
+checkRun.run(testRunner, contCheckRun)
+
+log.info 'DDA check run'
+
+
+
+}
+else if (AccTy.equals("OLN"))
+{
+
+
+// set the Request Header for account details svc and feed request property
+testRunner.testCase.getTestStepByName("accountDetailsOLN").testRequest.setRequestHeaders(headers)
+//log.info testRunner.testCase.getTestStepByName("accountDetailsOLN").testRequest.getRequestHeaders()
+	
+
+def AccId = resParsed.AccountDescriptorList[i].AccountId
+def Accou = 'accountId=' + AccId 
+def Stat= resParsed.AccountDescriptorList[i].Status
+log.info Stat
+log.info (Accou+"OLN")
+
+// Call Acc details service
+def sAcc = testRunner.testCase.testSteps["accountDetailsOLN"]
+testRunner.testCase.testSteps["accountDetailsOLN"].setPropertyValue('Request', Accou)
+def contsAcc=new WsdlTestRunContext(sAcc)
+sAcc.run(testRunner, contsAcc)
+ sleep(2000)
+
+//Parsing acc details response and setting Property Value Currency , pri Balance OLN Acct Test Case
+
+def OLNresp=testRunner.testCase.testSteps["accountDetailsOLN"].getPropertyValue('Response')
+def jsons4=new JsonSlurper();
+def OLNrespParsed=jsons4.parseText(OLNresp)
+
+
+def cur=OLNrespParsed.Currency.toString()
+def PriBal=OLNrespParsed.PrincipalBalance.toString()
+
+//Account Type from Account List. Status from Account List, as Loan Account Dtails doesnt return both
+
+testRunner.testCase.testSuite.testCases["OLN Acct test"].setPropertyValue('AccountType',AccTy)
+testRunner.testCase.testSuite.testCases["OLN Acct test"].setPropertyValue('Currency',cur)
+testRunner.testCase.testSuite.testCases["OLN Acct test"].setPropertyValue('PrincipalBalance',PriBal)
+testRunner.testCase.testSuite.testCases["OLN Acct test"].setPropertyValue('Status',Stat)
+
+
+
+//feed surrogate Account ID to acctSurrogat to get account number and card and branch details 
+
+def jsonReqAcctSurro = testRunner.testCase.testSuite.testCases["OLN Acct test"].getTestStepByName('acctSurrogat')
+def reqAcctSurro = jsonReqAcctSurro.getPropertyValue('Request')
+def jsons5 = new JsonSlurper();
+def reqParsed = jsons5.parseText (reqAcctSurro)
+log.info AccId
+reqParsed.idSet[0].id[0].idType=config.idType
+reqParsed.idSet[0].id[0].idValue=AccId
+
+def jsonReqAsString1 = JsonOutput.toJson(reqParsed)
+log.info(jsonReqAsString1)
+jsonReqAcctSurro.setPropertyValue('Request', jsonReqAsString1)
+
+//calling account Surrogate service
+
+def actSur = testRunner.testCase.testSuite.testCases["OLN Acct test"].testSteps["acctSurrogat"]
+
+def contActSur = new WsdlTestRunContext(actSur)
+actSur.run(testRunner, contActSur)
+
+// Taking out account number and client Card number , branch number from Acct Surrogate Response and feeding it to DDA Acct test TESTCASE
+
+def feedId=testRunner.testCase.testSuite.testCases["OLN Acct test"].testSteps["feedIdValue"]
+def contfeedId = new WsdlTestRunContext(feedId)
+feedId.run(testRunner, contfeedId)
+def idValue = testRunner.testCase.testSuite.testCases["OLN Acct test"].getPropertyValue('idValue').toString()
+def AcctNo= idValue.substring (17,28)
+def FetchedClientCard=idValue.substring (0,16)
+
+
+//parsed account details response and storing in testCase propety to check with Party acct rel datails 
+testRunner.testCase.testSuite.testCases["OLN Acct test"].setPropertyValue('AccountNumber',AcctNo)
+testRunner.testCase.testSuite.testCases["OLN Acct test"].setPropertyValue('FetchedClientCard',FetchedClientCard)
+
+//calling party acc rel
+def PartyRel=testRunner.testCase.testSuite.testCases["OLN Acct test"].testSteps["party acct rel"]
+
+def contPartyRel=new WsdlTestRunContext(PartyRel)
+PartyRel.run(testRunner, contPartyRel)
+
+sleep(2000)
+
+//calling OLN acct details check with pARTY ACC REL ccp SERVICES
+
+def checkRun = testRunner.testCase.testSuite.testCases["OLN Acct test"].testSteps["OLN acct details check with party ACCT rel1"]
+def contCheckRun=new WsdlTestRunContext(checkRun)
+checkRun.run(testRunner, contCheckRun)
+
+log.info 'OLN check run'
+
+}
+//def contsAcc=new WsdlTestRunContext(sAcc)
+//sAcc.run(testRunner, contsAcc)
+else if (AccTy.equals("VSA"))
+{
+
+// sET REQUEST HEADER FOR ACCOUNT dETAILS LOAN CALL AND CALL THE SVC	
+testRunner.testCase.getTestStepByName("accountDetailsVSA").testRequest.setRequestHeaders(headers)
+
+	
+def AccId = resParsed.AccountDescriptorList[i].AccountId
+def Accou = 'accountId=' + AccId 
+ 
+log.info (Accou+"VSA")
+def sAcc = testRunner.testCase.testSteps["accountDetailsVSA"]
+testRunner.testCase.testSteps["accountDetailsVSA"].setPropertyValue('Request', Accou)
+def contsAcc=new WsdlTestRunContext(sAcc)
+sAcc.run(testRunner, contsAcc)
+sleep (3000)
+//feed surrogate Account ID to acctSurrogat to get account number and card and branch details 
+
+def jsonReqAcctSurro = testRunner.testCase.testSuite.testCases["VSA Acct test"].getTestStepByName('acctSurrogat')
+def reqAcctSurro = jsonReqAcctSurro.getPropertyValue('Request')
+def jsons6 = new JsonSlurper();
+def reqParsed = jsons6.parseText (reqAcctSurro)
+
+reqParsed.idSet[0].id[0].idType=config.idType
+reqParsed.idSet[0].id[0].idValue=AccId
+
+def jsonReqAsString = JsonOutput.toJson(reqParsed)
+log.info(jsonReqAsString)
+jsonReqAcctSurro.setPropertyValue('Request', jsonReqAsString)
+
+//calling account Surrogate service
+
+def actSur = testRunner.testCase.testSuite.testCases["VSA Acct test"].testSteps["acctSurrogat"]
+
+def contActSur = new WsdlTestRunContext(actSur)
+actSur.run(testRunner, contActSur)
+
+// Taking out account number and client Card number , branch number from Acct Surrogate Response and feeding it to DDA Acct test TESTCASE
+
+def feedId=testRunner.testCase.testSuite.testCases["VSA Acct test"].testSteps["feedIdValue"]
+def contfeedId = new WsdlTestRunContext(feedId)
+feedId.run(testRunner, contfeedId)
+def idValue = testRunner.testCase.testSuite.testCases["VSA Acct test"].getPropertyValue('idValue').toString()
+def FetchedClientCard=idValue.substring (0,16)
+def CreditCardNumber=idValue.substring (17,32)
+
+
+
+testRunner.testCase.testSuite.testCases["VSA Acct test"].setPropertyValue('CreditCardNumber',CreditCardNumber)
+testRunner.testCase.testSuite.testCases["VSA Acct test"].setPropertyValue('FetchedClientCard',FetchedClientCard)
+//4519020080115870.000021020163
+
+
+//parsing account details response and storing in testCase propety to check with Party acct rel datails 
+
+def VSAresp=testRunner.testCase.testSteps["accountDetailsVSA"].getPropertyValue('Response')
+def jsons7=new JsonSlurper();
+def VSArespParsed=jsons7.parseText(VSAresp)
+
+
+def cur=VSArespParsed.Currency
+def creditLim=VSArespParsed.CreditLimit.toString()
+def stat=VSArespParsed.Status
+def AccOpn=VSArespParsed.FiAttributes[6].Value
+
+testRunner.testCase.testSuite.testCases["VSA Acct test"].setPropertyValue('AccountType',AccTy)
+testRunner.testCase.testSuite.testCases["VSA Acct test"].setPropertyValue('Currency',cur)
+testRunner.testCase.testSuite.testCases["VSA Acct test"].setPropertyValue('CreditLimit',creditLim)
+testRunner.testCase.testSuite.testCases["VSA Acct test"].setPropertyValue('Status',stat)
+testRunner.testCase.testSuite.testCases["VSA Acct test"].setPropertyValue('AccountOpenDate',AccOpn)
+
+//calling party acc rel
+def PartyRel=testRunner.testCase.testSuite.testCases["OLN Acct test"].testSteps["party acct rel"]
+
+def contPartyRel=new WsdlTestRunContext(PartyRel)
+PartyRel.run(testRunner, contPartyRel)
+
+sleep(2000)
+
+def checkRun = testRunner.testCase.testSuite.testCases["VSA Acct test"].testSteps["VSA acct details check with party ACCT rel"]
+def contCheckRun=new WsdlTestRunContext(checkRun)
+checkRun.run(testRunner, contCheckRun)
+
+log.info 'VSA check run'
+
+}
+
+}
