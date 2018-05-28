@@ -1,4 +1,4 @@
-//Groovy for API
+//Groovy for API TESTING
 
 //connect to mongo 
 import com.gmongo.GMongo
