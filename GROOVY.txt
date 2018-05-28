@@ -1,3 +1,5 @@
+//Groovy for API
+
 //connect to mongo 
 import com.gmongo.GMongo
 def mongo = new GMongo('localhost:27017');
